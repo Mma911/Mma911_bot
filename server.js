@@ -58,12 +58,11 @@ function connectDeriv() {
   console.log(`Connecting to Deriv WebSocket for ${DERIV_SYMBOL}...`);
   let ws;
   try {
-    // إضافة ترويسات لتجاوز حظر خوادم الاستضافة
     ws = new WebSocket(DERIV_WS_URL, {
-      handshakeTimeout: 15000,
+      handshakeTimeout: 20000,
       headers: {
         'Origin': 'https://app.deriv.com',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
   } catch (error) {
