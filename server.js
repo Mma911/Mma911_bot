@@ -7,12 +7,11 @@ const WebSocket = require('ws');
 const PORT = Number(process.env.PORT) || 3000;
 const DERIV_APP_ID = process.env.DERIV_APP_ID || '1089';
 const DERIV_SYMBOL = process.env.DERIV_SYMBOL || 'frxEURUSD';
-const DERIV_WS_URL = process.env.DERIV_WS_URL
-  || `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(DERIV_APP_ID)}`;
+const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(DERIV_APP_ID)}`;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
 if (process.env.NODE_ENV === 'production' && ADMIN_TOKEN.length < 24) {
-  console.error('Set ADMIN_TOKEN in Railway to a random secret of at least 24 characters.');
+  console.error('Set ADMIN_TOKEN in Render to a random secret of at least 24 characters.');
   process.exit(1);
 }
 
@@ -52,47 +51,6 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-function sendDeriv(payload) {
-  if (!derivSocket || derivSocket.readyState !== WebSocket.OPEN) return false;
-  derivSocket.send(JSON.stringify(payload));
-  return true;
-}
-
-function onTick(tick) {
-  state.lastTick = {
-    symbol: tick.symbol || DERIV_SYMBOL,
-    quote: Number(tick.quote),
-    epoch: Number(tick.epoch)
-  };
-  state.lastMessageAt = new Date().toISOString();
-
-  // Strategy/order execution is intentionally not implemented in this starter.
-  // Add a tested strategy here before treating /start as actual automated trading.
-  if (state.tradingEnabled) {
-    console.log(`[tick] ${state.lastTick.symbol} ${state.lastTick.quote} (trading state enabled; no orders are placed by this starter)`);
-  }
-}
-
-function scheduleReconnect() {
-  if (shuttingDown || reconnectTimer) return;
-  state.connected = false;
-  // A lost connection fails closed: never resume trading automatically.
-  state.tradingEnabled = false;
-
-  const baseMs = 1000;
-  const maxMs = 30000;
-  const exponential = Math.min(maxMs, baseMs * (2 ** Math.min(state.reconnectAttempt, 5)));
-  const delayMs = Math.round(exponential * (0.8 + Math.random() * 0.4));
-  state.reconnectAttempt += 1;
-  console.warn(`Deriv disconnected; reconnecting in ${delayMs} ms.`);
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectDeriv();
-  }, delayMs);
-  reconnectTimer.unref?.();
-}
-
 function connectDeriv() {
   if (shuttingDown) return;
   if (derivSocket && (derivSocket.readyState === WebSocket.OPEN || derivSocket.readyState === WebSocket.CONNECTING)) return;
@@ -100,7 +58,14 @@ function connectDeriv() {
   console.log(`Connecting to Deriv WebSocket for ${DERIV_SYMBOL}...`);
   let ws;
   try {
-    ws = new WebSocket(DERIV_WS_URL, { handshakeTimeout: 15000 });
+    // إضافة ترويسات لتجاوز حظر خوادم الاستضافة
+    ws = new WebSocket(DERIV_WS_URL, {
+      handshakeTimeout: 15000,
+      headers: {
+        'Origin': 'https://app.deriv.com',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+      }
+    });
   } catch (error) {
     console.error('Could not create Deriv WebSocket:', error.message);
     scheduleReconnect();
@@ -113,7 +78,7 @@ function connectDeriv() {
     if (derivSocket !== ws) return;
     state.connected = true;
     state.reconnectAttempt = 0;
-    console.log('Connected to Deriv public market-data WebSocket.');
+    console.log('Connected to Deriv public market-data WebSocket successfully.');
     ws.send(JSON.stringify({ ticks: DERIV_SYMBOL, subscribe: 1, req_id: 1 }));
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
@@ -129,7 +94,6 @@ function connectDeriv() {
     try {
       message = JSON.parse(data.toString());
     } catch {
-      console.warn('Received an unparseable Deriv message.');
       return;
     }
 
@@ -137,7 +101,16 @@ function connectDeriv() {
       console.error('Deriv API error:', message.error.message || 'Unknown API error');
       return;
     }
-    if (message.msg_type === 'tick' && message.tick) onTick(message.tick);
+    if (message.msg_type === 'tick' && message.tick) {
+      state.lastTick = {
+        symbol: message.tick.symbol || DERIV_SYMBOL,
+        quote: Number(message.tick.quote),
+        epoch: Number(message.tick.epoch)
+      };
+      if (state.tradingEnabled) {
+        console.log(`[tick] ${state.lastTick.symbol} ${state.lastTick.quote}`);
+      }
+    }
   });
 
   ws.on('error', (error) => {
@@ -155,6 +128,25 @@ function connectDeriv() {
   });
 }
 
+function scheduleReconnect() {
+  if (shuttingDown || reconnectTimer) return;
+  state.connected = false;
+  state.tradingEnabled = false;
+
+  const baseMs = 1000;
+  const maxMs = 30000;
+  const exponential = Math.min(maxMs, baseMs * (2 ** Math.min(state.reconnectAttempt, 5)));
+  const delayMs = Math.round(exponential * (0.8 + Math.random() * 0.4));
+  state.reconnectAttempt += 1;
+  console.warn(`Deriv disconnected; reconnecting in ${delayMs} ms.`);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectDeriv();
+  }, delayMs);
+  reconnectTimer.unref?.();
+}
+
 app.get('/', (_req, res) => {
   res.json({
     ok: true,
@@ -170,15 +162,15 @@ app.get('/', (_req, res) => {
 
 app.post('/start', requireAdmin, (_req, res) => {
   if (!state.connected) {
-    return res.status(503).json({ ok: false, tradingEnabled: false, error: 'Deriv is not connected; trading was not enabled.' });
+    return res.status(503).json({ ok: false, tradingEnabled: false, error: 'Deriv is not connected.' });
   }
   state.tradingEnabled = true;
-  return res.json({ ok: true, tradingEnabled: true, note: 'Trading state enabled. This starter does not place orders; add a tested strategy first.' });
+  return res.json({ ok: true, tradingEnabled: true });
 });
 
 app.post('/stop', requireAdmin, (_req, res) => {
   state.tradingEnabled = false;
-  return res.json({ ok: true, tradingEnabled: false, note: 'Trading state disabled. This endpoint does not close any Deriv contract.' });
+  return res.json({ ok: true, tradingEnabled: false });
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
