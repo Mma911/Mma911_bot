@@ -5,9 +5,10 @@ const WebSocket = require('ws');
 function validateRealUrl(value) {
   let url;
   try { url = new URL(value); } catch { throw new Error('Invalid authenticated WebSocket URL.'); }
+  const validPath = url.pathname === '/trading/v1/options/ws/real' || url.pathname === '/trading/v1/options/ws/demo';
   if (url.protocol !== 'wss:' || url.hostname !== 'api.derivws.com' ||
-      url.pathname !== '/trading/v1/options/ws/real' || url.port || url.username || url.password || url.hash || url.searchParams.getAll('otp').length !== 1 || !url.searchParams.get('otp') || [...url.searchParams.keys()].some(key => key !== 'otp')) {
-    throw new Error('Refusing a non-real WebSocket endpoint.');
+      !validPath || url.port || url.username || url.password || url.hash || url.searchParams.getAll('otp').length !== 1 || !url.searchParams.get('otp') || [...url.searchParams.keys()].some(key => key !== 'otp')) {
+    throw new Error('Refusing an invalid WebSocket endpoint.');
   }
   return value;
 }
@@ -27,7 +28,7 @@ class DerivClient extends EventEmitter {
         signal: AbortSignal.timeout(15000)
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(`Real-account authentication failed (HTTP ${response.status}).`);
+      if (!response.ok) throw new Error(`Account authentication failed (HTTP ${response.status}).`);
       const url = validateRealUrl(body?.data?.url);
       if (this.closed) return;
       const ws = new this.WebSocket(url, { handshakeTimeout: 15000 }); this.socket = ws;
@@ -53,14 +54,14 @@ class DerivClient extends EventEmitter {
         }
         this.emit('message', message);
       });
-      ws.on('error', () => { this.realAuthenticated = false; this.emit('warning', 'Real-account WebSocket transport error.'); ws.terminate(); });
+      ws.on('error', () => { this.realAuthenticated = false; this.emit('warning', 'WebSocket transport error.'); ws.terminate(); });
       ws.on('close', () => {
         if (this.socket !== ws) return;
         clearInterval(this.pingTimer); this.connected = false; this.realAuthenticated = false; this.socket = null;
-        for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Real-account disconnected; request outcome may be unknown.')); }
+        for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Account disconnected; request outcome may be unknown.')); }
         this.pending.clear(); this.emit('disconnected'); this.reconnect();
       });
-    } catch (error) { this.emit('warning', 'Real-account authentication/connection failed; check account type, PAT, app ID and network.'); this.reconnect(); }
+    } catch (error) { this.emit('warning', error.message || 'Authentication/connection failed; check account ID, PAT, app ID and network.'); this.reconnect(); }
     finally { this.connecting = false; }
   }
   reconnect() {
@@ -70,7 +71,7 @@ class DerivClient extends EventEmitter {
     this.reconnectTimer.unref?.();
   }
   request(payload) {
-    if (this.closed || !this.connected || !this.socket) return Promise.reject(new Error('Real-account is disconnected.'));
+    if (this.closed || !this.connected || !this.socket) return Promise.reject(new Error('Account is disconnected.'));
     const req_id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(req_id); reject(new Error('Deriv request timed out; do not blindly retry a purchase.')); }, this.requestTimeout);
