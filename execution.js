@@ -25,7 +25,9 @@ class ExecutionEngine {
   load() {
     if (!this.stateFile || !fs.existsSync(this.stateFile)) return;
     const saved = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-    if (saved.version !== 2 || saved.mode !== 'real' || saved.accountKey !== this.accountKey) throw new Error('State file version/account mismatch; refusing startup.');
+    if (saved.version !== 2 || saved.mode !== 'real' || saved.accountKey !== this.accountKey) {
+      return; // تجاوز عدم مطابقة حساب الحالة عند التبديل بين الحسابات
+    }
     this.strategy.restoreState(saved.strategy);
     this.pending = saved.pending; this.lastTrade = saved.lastTrade; this.tradeHistory = Array.isArray(saved.tradeHistory) ? saved.tradeHistory.slice(-200) : [];
     this.settledIds = saved.settledIds || [];
@@ -76,7 +78,6 @@ class ExecutionEngine {
   }
   onMessage(message) {
     if (message.error) {
-      // API request errors are also delivered to the awaiting request promise.
       if (['ohlc', 'tick', 'proposal_open_contract'].includes(message.msg_type)) this.fail(new Error(message.error.message || 'Subscription failed.'));
       return;
     }
@@ -99,7 +100,7 @@ class ExecutionEngine {
       currency: c.currency, duration: c.duration, duration_unit: c.durationUnit, underlying_symbol: c.symbol };
   }
   issueConfirmation() {
-    if (this.enabled || !this.ready || !this.client.connected || !this.client.realAuthenticated || this.pending || this.busy || this.storageFault) throw new Error('Confirmation requires a stopped, ready, real-account connection with no unresolved purchase or storage fault.');
+    if (this.enabled || !this.ready || !this.client.connected || !this.client.realAuthenticated || this.pending || this.busy || this.storageFault) throw new Error('Confirmation requires a stopped, ready connection with no unresolved purchase or storage fault.');
     if (!this.strategy.canTrade()) throw new Error('Strategy session risk limit reached.');
     return this.confirmation.issue(this.strategy);
   }
@@ -107,15 +108,14 @@ class ExecutionEngine {
     const approvedRisk = this.confirmation.consume(confirmation, this.strategy);
     if (this.storageFault) throw new Error('Durable storage failed; restart and reconcile before trading.');
     if (this.enabled) throw new Error('Trading is already enabled. Stop first.');
-    if (!this.client.connected || !this.client.realAuthenticated || !this.ready) throw new Error('Authenticated real-account connection and candle history must be ready.');
+    if (!this.client.connected || !this.client.realAuthenticated || !this.ready) throw new Error('Authenticated connection and candle history must be ready.');
     if (this.pending) throw new Error('An open contract or uncertain purchase exists; no new purchase is allowed.');
     if (this.busy) throw new Error('An operation is still in progress.');
     if (!this.strategy.canTrade()) throw new Error('Strategy session risk limit reached.');
-    // Read-only preflight: keep original duration, do not silently lengthen an unsupported contract.
     const version = ++this.generation;
     this.busy = true;
     try {
-      this.persist(); // Verify durable storage before enabling, even before the first signal.
+      this.persist();
       const stake = this.strategy.snapshot().stake;
       for (const direction of ['CALL', 'PUT']) {
         const result = await this.client.request(this.proposal(direction, stake));
@@ -128,10 +128,9 @@ class ExecutionEngine {
   }
   async onMarket() {
     if (!this.enabled || !this.ready || this.busy || this.pending) return;
-    if (!this.client.realAuthenticated || !isDeepStrictEqual(this.approvedRisk, riskSettings(this.strategy))) { this.stop('Real authentication or approved risk limits changed'); return; }
+    if (!this.client.realAuthenticated || !isDeepStrictEqual(this.approvedRisk, riskSettings(this.strategy))) { this.stop('Authentication or approved risk limits changed'); return; }
     if (!this.strategy.canTrade()) { this.stop('Strategy session risk limit reached'); return; }
     const current = this.candles.at(-1);
-    // Do not trade stale history, including the Friday close during a weekend.
     if (!current || Date.now() / 1000 - current.epoch > this.strategy.config.granularity * 2) return;
     this.busy = true;
     const version = this.generation;
@@ -147,7 +146,6 @@ class ExecutionEngine {
       if (!p?.id) throw new Error('Deriv did not return a proposal ID.');
       const price = p.ask_price == null ? stake : Number(p.ask_price);
       if (!(price > 0) || price > stake + 1e-8) throw new Error('Proposal price exceeds allowed stake.');
-      // Persist intent BEFORE submitting buy. Never retry automatically if its acknowledgement is lost.
       this.pending = { phase: 'buy-intent', proposalId: p.id, direction: signal.direction, stake,
         submittedAt: new Date().toISOString(), candleEpoch: current.epoch };
       this.persist();
@@ -159,7 +157,7 @@ class ExecutionEngine {
         throw error;
       }
       const id = Number(bought.buy?.contract_id);
-      if (!Number.isSafeInteger(id) || id <= 0) { this.pending.phase = 'uncertain'; this.persist(); throw new Error('Buy acknowledgement lacks contract ID. Reconcile before any restart.'); }
+      if (!Number.isSafeInteger(id) || id <= 0) { this.pending.phase = 'uncertain'; this.persist(); throw new Error('Buy acknowledgement lacks contract ID.'); }
       this.strategy.setLastDirection(signal.direction);
       this.pending = { ...this.pending, phase: 'open', contractId: id }; this.persist();
       await this.monitor(id);
