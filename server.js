@@ -10,8 +10,6 @@ function createApp(engine, adminToken) {
   if (typeof adminToken !== 'string' || adminToken.length < 24) throw new Error('ADMIN_TOKEN must contain at least 24 characters.');
   const app = express();
   app.disable('x-powered-by');
-  // Android loads this packaged dashboard from file://, which sends Origin: null.
-  // Allow only that opaque origin; every data/control endpoint still requires ADMIN_TOKEN.
   app.use((req, res, next) => {
     const origin = req.get('origin');
     if (origin === 'null') {
@@ -65,12 +63,12 @@ function createApp(engine, adminToken) {
     catch (error) { res.status(409).json({ ok: false, error: error.message }); }
   });
   app.post('/start', requireAdmin, async (req, res) => {
-    try { res.json({ ok: true, ...await engine.start(req.body), note: 'REAL-MONEY execution enabled with explicitly confirmed stake and risk limits. Orders are submitted only when the original strategy signals.' }); }
+    try { res.json({ ok: true, ...await engine.start(req.body), note: 'Execution enabled with explicitly confirmed stake and risk limits.' }); }
     catch (error) { res.status(409).json({ ok: false, tradingEnabled: engine.enabled, error: error.message }); }
   });
   app.post('/stop', requireAdmin, (_req, res) => {
     engine.stop(); res.json({ ok: true, tradingEnabled: false,
-      note: 'No new purchases will be submitted. A buy already submitted cannot be cancelled; open contracts remain monitored until settlement.' });
+      note: 'No new purchases will be submitted.' });
   });
   app.post('/reconcile', requireAdmin, async (req, res) => {
     try { res.json({ ok: true, ...await engine.reconcile(req.body?.contractId) }); }
@@ -83,15 +81,17 @@ function main() {
   const missing = ['DERIV_APP_ID', 'DERIV_PAT', 'DERIV_ACCOUNT_ID', 'ADMIN_TOKEN', 'STATE_FILE'].filter(key => !process.env[key]);
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   if (process.env.ADMIN_TOKEN.length < 24) throw new Error('ADMIN_TOKEN must contain at least 24 characters.');
-  if (process.env.DERIV_SYMBOL && process.env.DERIV_SYMBOL !== 'frxEURUSD') throw new Error('This strategy is locked to the imported frxEURUSD market.');
   const strategy = new Strategy();
+  if (process.env.DERIV_SYMBOL) {
+    strategy.config.symbol = process.env.DERIV_SYMBOL.trim();
+  }
   const client = new DerivClient({ appId: process.env.DERIV_APP_ID, pat: process.env.DERIV_PAT, accountId: process.env.DERIV_ACCOUNT_ID });
   const stateFile = process.env.STATE_FILE;
   if (!path.isAbsolute(stateFile)) throw new Error('STATE_FILE must be an absolute path on a persistent disk.');
   const engine = new ExecutionEngine({ client, strategy, stateFile, accountId: process.env.DERIV_ACCOUNT_ID });
   const app = createApp(engine, process.env.ADMIN_TOKEN);
   const server = app.listen(Number(process.env.PORT) || 3000, '0.0.0.0', () => {
-    console.log('SCDP REAL-MONEY service listening. Deriv connection is stopped until authenticated POST /connect.');
+    console.log(`SCDP service listening on symbol ${strategy.config.symbol}. Deriv connection is stopped until authenticated POST /connect.`);
   });
   let closing = false;
   const shutdown = () => {
